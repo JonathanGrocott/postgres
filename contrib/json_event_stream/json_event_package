@@ -1,0 +1,143 @@
+#!/bin/sh
+#
+# json_event_package - build a staged stripped JSON event PostgreSQL package.
+
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+TOP_BUILDDIR=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+OUTDIR="$TOP_BUILDDIR/artifacts"
+PREFIX="/usr/local/pgsql"
+NAME="postgres-json-event"
+JOBS=""
+SKIP_BUILD="0"
+VERBOSE="0"
+
+usage()
+{
+	cat <<'EOF'
+Usage: json_event_package [OPTIONS]
+
+Build and package the stripped JSON event PostgreSQL profile.
+
+Options:
+      --top-builddir DIR   Configured PostgreSQL build tree (default: script repo)
+      --output-dir DIR     Artifact output directory (default: TOP/artifacts)
+      --prefix PREFIX      Install prefix inside the package (default: /usr/local/pgsql)
+      --name NAME          Package directory/archive base name
+  -j, --jobs N             Parallel make jobs
+      --skip-build         Package from an existing build
+      --verbose            Stream make output instead of writing a build log
+  -h, --help               Show this help
+
+The script creates:
+  OUTDIR/NAME.tar.gz
+  OUTDIR/NAME.MANIFEST
+  OUTDIR/NAME.BUILDINFO
+  OUTDIR/NAME.BUILDLOG
+EOF
+}
+
+die()
+{
+	echo "json_event_package: $*" >&2
+	exit 1
+}
+
+run_make()
+{
+	if [ "$VERBOSE" = "1" ]; then
+		make "$@"
+	else
+		make "$@" >>"$BUILDLOG" 2>&1
+	fi
+}
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--top-builddir)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			TOP_BUILDDIR=$2
+			shift 2
+			;;
+		--output-dir)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			OUTDIR=$2
+			shift 2
+			;;
+		--prefix)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			PREFIX=$2
+			shift 2
+			;;
+		--name)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			NAME=$2
+			shift 2
+			;;
+		-j|--jobs)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			JOBS="-j$2"
+			shift 2
+			;;
+		--skip-build)
+			SKIP_BUILD="1"
+			shift
+			;;
+		--verbose)
+			VERBOSE="1"
+			shift
+			;;
+		-h|--help)
+			usage
+			exit 0
+			;;
+		*)
+			die "unknown option: $1"
+			;;
+	esac
+done
+
+[ -f "$TOP_BUILDDIR/GNUmakefile" ] || die "$TOP_BUILDDIR does not look like a configured PostgreSQL build tree"
+
+OUTDIR=$(mkdir -p "$OUTDIR" && CDPATH= cd -- "$OUTDIR" && pwd)
+WORKDIR="$OUTDIR/.${NAME}.work"
+PKGROOT="$WORKDIR/$NAME"
+ARCHIVE="$OUTDIR/$NAME.tar.gz"
+MANIFEST="$OUTDIR/$NAME.MANIFEST"
+BUILDINFO="$OUTDIR/$NAME.BUILDINFO"
+BUILDLOG="$OUTDIR/$NAME.BUILDLOG"
+
+rm -rf "$WORKDIR" "$ARCHIVE" "$MANIFEST" "$BUILDINFO" "$BUILDLOG"
+mkdir -p "$PKGROOT"
+
+if [ "$SKIP_BUILD" != "1" ]; then
+	run_make -C "$TOP_BUILDDIR" $JOBS json-event-stripped-world
+fi
+
+run_make -C "$TOP_BUILDDIR" json-event-stripped-install DESTDIR="$PKGROOT" prefix="$PREFIX"
+
+{
+	echo "name=$NAME"
+	echo "prefix=$PREFIX"
+	echo "top_builddir=$TOP_BUILDDIR"
+	echo "created_at_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+	if command -v git >/dev/null 2>&1 && git -C "$TOP_BUILDDIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+		echo "git_revision=$(git -C "$TOP_BUILDDIR" rev-parse HEAD)"
+		echo "git_dirty=$(git -C "$TOP_BUILDDIR" status --short | wc -l | tr -d ' ')"
+	fi
+} >"$BUILDINFO"
+
+cp "$BUILDINFO" "$PKGROOT/BUILDINFO"
+find "$PKGROOT" -type f | sed "s#^$PKGROOT/##" | sort >"$MANIFEST"
+cp "$MANIFEST" "$PKGROOT/MANIFEST"
+
+(
+	cd "$WORKDIR"
+	tar -czf "$ARCHIVE" "$NAME"
+)
+
+echo "archive=$ARCHIVE"
+echo "manifest=$MANIFEST"
+echo "buildinfo=$BUILDINFO"
+echo "buildlog=$BUILDLOG"

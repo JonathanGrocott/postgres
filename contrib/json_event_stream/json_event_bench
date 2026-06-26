@@ -1,0 +1,324 @@
+#!/bin/sh
+#
+# json_event_bench - small benchmark harness for json_event_stream.
+
+set -eu
+
+DBNAME="${PGDATABASE:-postgres}"
+STREAM="bench_events"
+SCHEMA="public"
+ROWS="10000"
+PARTITION_INTERVAL="1 day"
+RETENTION="7 days"
+RESET="1"
+PAYLOAD_GIN="false"
+PSQL="${PSQL:-psql}"
+
+usage()
+{
+	cat <<'EOF'
+Usage: json_event_bench [OPTIONS]
+
+Run a compact append/query/storage benchmark for the json_event_stream extension.
+
+Options:
+  -d, --dbname CONNINFO          Database name or libpq connection string
+  -s, --stream NAME              Stream table name (default: bench_events)
+      --schema NAME              Schema for the stream (default: public)
+  -n, --rows ROWS                Events to ingest (default: 10000)
+      --partition-interval INT   Stream partition interval (default: 1 day)
+      --retention INT            Retention interval for dry-run checks (default: 7 days)
+      --payload-gin              Create payload jsonb_path_ops GIN index
+      --no-reset                 Reuse existing stream instead of dropping/recreating it
+  -h, --help                     Show this help
+
+The output is tab-separated so it can be pasted into a spreadsheet or diffed
+between builds. Metrics include append throughput, topic/time and jsonpath query
+latency, retention dry-run results, table/index bytes, and index bytes per row.
+EOF
+}
+
+die()
+{
+	echo "json_event_bench: $*" >&2
+	exit 1
+}
+
+is_simple_identifier()
+{
+	case "$1" in
+		""|*[!A-Za-z0-9_]*|[0-9]*)
+			return 1
+			;;
+		*)
+			return 0
+			;;
+	esac
+}
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		-d|--dbname)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			DBNAME="$2"
+			shift 2
+			;;
+		-s|--stream)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			STREAM="$2"
+			shift 2
+			;;
+		--schema)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			SCHEMA="$2"
+			shift 2
+			;;
+		-n|--rows)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			ROWS="$2"
+			shift 2
+			;;
+		--partition-interval)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			PARTITION_INTERVAL="$2"
+			shift 2
+			;;
+		--retention)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			RETENTION="$2"
+			shift 2
+			;;
+		--payload-gin)
+			PAYLOAD_GIN="true"
+			shift
+			;;
+		--no-reset)
+			RESET="0"
+			shift
+			;;
+		-h|--help)
+			usage
+			exit 0
+			;;
+		*)
+			die "unknown option: $1"
+			;;
+	esac
+done
+
+case "$ROWS" in
+	""|*[!0-9]*)
+		die "--rows must be a positive integer"
+		;;
+esac
+[ "$ROWS" -gt 0 ] || die "--rows must be a positive integer"
+
+is_simple_identifier "$SCHEMA" || die "--schema must be a simple SQL identifier"
+is_simple_identifier "$STREAM" || die "--stream must be a simple SQL identifier"
+
+QUALIFIED="\"$SCHEMA\".\"$STREAM\""
+
+"$PSQL" "$DBNAME" \
+	-X \
+	-q \
+	-v ON_ERROR_STOP=1 \
+	-v schema="$SCHEMA" \
+	-v stream="$STREAM" \
+	-v qualified="$QUALIFIED" \
+	-v rows="$ROWS" \
+	-v reset="$RESET" \
+	-v partition_interval="$PARTITION_INTERVAL" \
+	-v retention="$RETENTION" \
+	-v payload_gin="$PAYLOAD_GIN" <<'SQL'
+\pset tuples_only on
+\pset format unaligned
+\pset fieldsep '\t'
+
+\o /dev/null
+CREATE EXTENSION IF NOT EXISTS json_event_stream;
+
+SELECT set_config('json_event_bench.schema', :'schema', false);
+SELECT set_config('json_event_bench.stream', :'stream', false);
+SELECT set_config('json_event_bench.reset', :'reset', false);
+
+DO $$
+DECLARE
+	stream_schema name := current_setting('json_event_bench.schema')::name;
+	stream_name name := current_setting('json_event_bench.stream')::name;
+	stream_oid regclass;
+BEGIN
+	IF current_setting('json_event_bench.reset')::int = 0 THEN
+		RETURN;
+	END IF;
+
+	stream_oid := to_regclass(format('%I.%I', stream_schema, stream_name));
+	IF stream_oid IS NOT NULL THEN
+		DELETE FROM json_event_sources WHERE stream_table = stream_oid;
+		DELETE FROM json_event_streams WHERE stream_table = stream_oid;
+		EXECUTE format('DROP TABLE IF EXISTS %I.%I CASCADE', stream_schema, stream_name);
+	END IF;
+END
+$$;
+
+SELECT json_event_stream_create(
+	:'schema'::name,
+	:'stream'::name,
+	:'partition_interval'::interval,
+	:'retention'::interval,
+	:'payload_gin'::boolean);
+\o
+
+SELECT 'section', 'metric', 'value', 'unit';
+SELECT 'config', 'database', current_database(), '';
+SELECT 'config', 'stream', :'qualified', '';
+SELECT 'config', 'rows', :'rows', 'events';
+SELECT 'config', 'partition_interval', :'partition_interval', '';
+SELECT 'config', 'retention', :'retention', '';
+SELECT 'config', 'payload_gin', :'payload_gin', '';
+
+WITH inserted AS (
+	SELECT
+		count(*) AS rows_inserted,
+		min(started_at) AS started_at,
+		clock_timestamp() AS finished_at
+	FROM (
+		SELECT
+			clock_timestamp() AS started_at,
+			json_event_stream_ingest(
+				:'qualified'::regclass,
+				'bench',
+				'factory/line' || ((g % 16) + 1)::text || '/sensor/' || ((g % 64) + 1)::text,
+				jsonb_build_object(
+					'seq', g,
+					'temperature', (g % 120),
+					'humidity', (35 + (g % 50)),
+					'device', 'device-' || ((g % 128) + 1)::text,
+					'ok', (g % 19) <> 0),
+				jsonb_build_object('bench', true, 'batch', :'rows'::bigint),
+				clock_timestamp() - ((g % 3600)::text || ' seconds')::interval,
+				clock_timestamp() - ((g % 7200)::text || ' seconds')::interval)
+		FROM generate_series(1, :'rows'::bigint) AS g
+	) s
+)
+SELECT
+	'append',
+	'elapsed_ms',
+	round(extract(epoch FROM finished_at - started_at) * 1000.0, 3),
+	'ms'
+FROM inserted
+UNION ALL
+SELECT
+	'append',
+	'events_per_second',
+	round(rows_inserted / GREATEST(extract(epoch FROM finished_at - started_at), 0.001), 3),
+	'events/s'
+FROM inserted
+UNION ALL
+SELECT 'append', 'rows_inserted', rows_inserted, 'events'
+FROM inserted;
+
+WITH started AS (
+	SELECT clock_timestamp() AS t
+),
+q AS (
+	SELECT count(*) AS matched
+	FROM :qualified
+	WHERE topic LIKE 'factory/line1/%'
+	  AND received_at >= clock_timestamp() - interval '3 hours'
+)
+SELECT
+	'query_topic_time',
+	'elapsed_ms',
+	round(extract(epoch FROM clock_timestamp() - started.t) * 1000.0, 3),
+	'ms'
+FROM started, q
+UNION ALL
+SELECT 'query_topic_time', 'matched_rows', matched, 'rows'
+FROM q;
+
+WITH started AS (
+	SELECT clock_timestamp() AS t
+),
+q AS (
+	SELECT count(*) AS matched
+	FROM :qualified
+	WHERE payload @? '$.temperature ? (@ > 80)'
+)
+SELECT
+	'query_jsonpath',
+	'elapsed_ms',
+	round(extract(epoch FROM clock_timestamp() - started.t) * 1000.0, 3),
+	'ms'
+FROM started, q
+UNION ALL
+SELECT 'query_jsonpath', 'matched_rows', matched, 'rows'
+FROM q;
+
+WITH retention AS (
+	SELECT count(*) FILTER (WHERE would_drop) AS would_drop,
+		   count(*) AS partitions_checked
+	FROM json_event_stream_apply_retention(:'qualified'::regclass, true)
+)
+SELECT 'retention_dry_run', 'partitions_checked', partitions_checked, 'partitions'
+FROM retention
+UNION ALL
+SELECT 'retention_dry_run', 'would_drop', would_drop, 'partitions'
+FROM retention;
+
+WITH stream_relations AS (
+	SELECT relid
+	FROM pg_partition_tree(:'qualified'::regclass)
+),
+stream_indexes AS (
+	SELECT
+		c.oid,
+		c.relname,
+		am.amname,
+		pg_relation_size(c.oid) AS index_bytes
+	FROM pg_index i
+	JOIN pg_class c ON c.oid = i.indexrelid
+	JOIN pg_am am ON am.oid = c.relam
+	WHERE i.indrelid IN (SELECT relid FROM stream_relations)
+),
+storage AS (
+	SELECT
+		(SELECT count(*) FROM :qualified) AS event_rows,
+		(SELECT sum(pg_total_relation_size(relid)) FROM stream_relations) AS total_bytes,
+		(SELECT sum(pg_relation_size(relid)) FROM stream_relations) AS table_bytes,
+		COALESCE(sum(index_bytes), 0) AS index_bytes,
+		COALESCE(sum(index_bytes) FILTER (WHERE amname = 'gin'), 0) AS payload_gin_bytes
+	FROM stream_indexes
+)
+SELECT 'storage', 'total_bytes', total_bytes, 'bytes'
+FROM storage
+UNION ALL
+SELECT 'storage', 'table_bytes', table_bytes, 'bytes'
+FROM storage
+UNION ALL
+SELECT 'storage', 'index_bytes', index_bytes, 'bytes'
+FROM storage
+UNION ALL
+SELECT 'storage', 'payload_gin_bytes', payload_gin_bytes, 'bytes'
+FROM storage
+UNION ALL
+SELECT
+	'storage',
+	'index_bytes_per_row',
+	round(index_bytes::numeric / GREATEST(event_rows, 1), 3),
+	'bytes/row'
+FROM storage;
+
+SELECT 'index', relname, index_bytes, 'bytes'
+FROM (
+	SELECT
+		c.relname,
+		pg_relation_size(c.oid) AS index_bytes
+	FROM pg_index i
+	JOIN pg_class c ON c.oid = i.indexrelid
+	WHERE i.indrelid IN (
+		SELECT relid
+		FROM pg_partition_tree(:'qualified'::regclass)
+	)
+	ORDER BY c.relname
+) indexes;
+SQL

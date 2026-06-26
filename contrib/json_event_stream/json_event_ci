@@ -1,0 +1,249 @@
+#!/bin/sh
+#
+# json_event_ci - local CI driver for the stripped JSON event profile.
+
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+TOP_BUILDDIR=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+OUTDIR="$TOP_BUILDDIR/artifacts/json_event_ci"
+JOBS=""
+ROWS="100"
+KEEP_ARTIFACTS="0"
+SKIP_PACKAGE="0"
+SKIP_REGRESS="0"
+VERBOSE="0"
+CI_LOG=""
+REGRESS_LOG=""
+
+usage()
+{
+	cat <<'EOF'
+Usage: json_event_ci [OPTIONS]
+
+Run the JSON event stripped-profile CI gate locally.
+
+Options:
+      --top-builddir DIR   Configured PostgreSQL build tree (default: script repo)
+      --output-dir DIR     Artifact output directory
+  -j, --jobs N             Parallel make jobs
+      --rows N             Rows for smoke/benchmark sanity checks (default: 100)
+      --skip-package       Skip package artifact generation
+      --skip-regress       Skip SQL regression tests
+      --keep-artifacts     Keep temporary package artifacts
+      --verbose            Stream package build output
+  -h, --help               Show this help
+
+The gate covers:
+  1. stripped profile build
+  2. json_event_stream SQL regression tests
+  3. package artifact creation
+  4. installed smoke test
+  5. benchmark sanity run
+EOF
+}
+
+die()
+{
+	echo "json_event_ci: $*" >&2
+	exit 1
+}
+
+log()
+{
+	printf '%s\n' "==> $*"
+}
+
+on_exit()
+{
+	rc=$?
+
+	[ "$rc" -ne 0 ] || return 0
+
+	if [ -n "$CI_LOG" ] && [ -f "$CI_LOG" ]; then
+		echo "==> tail of $CI_LOG" >&2
+		tail -120 "$CI_LOG" >&2 || true
+	fi
+	if [ -n "$REGRESS_LOG" ] && [ -f "$REGRESS_LOG" ]; then
+		echo "==> tail of $REGRESS_LOG" >&2
+		tail -120 "$REGRESS_LOG" >&2 || true
+	fi
+
+	exit "$rc"
+}
+
+trap on_exit EXIT
+
+run_make()
+{
+	if [ "$VERBOSE" = "1" ]; then
+		make "$@"
+	else
+		make "$@" >>"$CI_LOG" 2>&1
+	fi
+}
+
+patch_darwin_libpq_install_names()
+{
+	[ "$(uname -s)" = "Darwin" ] || return 0
+	[ -d "$TOP_BUILDDIR/tmp_install/usr/local/pgsql/bin" ] || return 0
+
+	for f in "$TOP_BUILDDIR"/tmp_install/usr/local/pgsql/bin/*; do
+		if [ -f "$f" ] && otool -L "$f" 2>/dev/null | grep -q '/usr/local/pgsql/lib/libpq.5.dylib'; then
+			install_name_tool -change /usr/local/pgsql/lib/libpq.5.dylib @loader_path/../lib/libpq.5.dylib "$f" || true
+		fi
+	done
+
+	if [ -f "$TOP_BUILDDIR/src/test/regress/pg_regress" ] &&
+	   otool -L "$TOP_BUILDDIR/src/test/regress/pg_regress" 2>/dev/null | grep -q '/usr/local/pgsql/lib/libpq.5.dylib'; then
+		install_name_tool -change /usr/local/pgsql/lib/libpq.5.dylib @loader_path/../../interfaces/libpq/libpq.5.dylib "$TOP_BUILDDIR/src/test/regress/pg_regress" || true
+	fi
+}
+
+run_regressions()
+{
+	log "running SQL regressions"
+	REGRESS_LOG="$OUTDIR/json_event_stream_regress.log"
+
+	if make -C "$TOP_BUILDDIR/contrib/json_event_stream" check >"$REGRESS_LOG" 2>&1; then
+		tail -20 "$REGRESS_LOG"
+		return 0
+	fi
+
+	if [ "$(uname -s)" != "Darwin" ] || ! grep -q '/usr/local/pgsql/lib/libpq.5.dylib' "$REGRESS_LOG"; then
+		cat "$REGRESS_LOG"
+		die "SQL regression tests failed"
+	fi
+
+	log "retrying SQL regressions with Darwin temp-install libpq workaround"
+	patch_darwin_libpq_install_names
+	(
+		cd "$TOP_BUILDDIR/contrib/json_event_stream"
+		PATH="$TOP_BUILDDIR/tmp_install/usr/local/pgsql/bin:$TOP_BUILDDIR/contrib/json_event_stream:$PATH" \
+		DYLD_LIBRARY_PATH="$TOP_BUILDDIR/tmp_install/usr/local/pgsql/lib" \
+		INITDB_TEMPLATE="$TOP_BUILDDIR/tmp_install/initdb-template" \
+		"$TOP_BUILDDIR/src/test/regress/pg_regress" \
+			--temp-instance=./tmp_check \
+			--inputdir=. \
+			--bindir= \
+			--dbname=contrib_regression \
+			json_event_stream_upgrade json_event_stream
+	)
+}
+
+run_installed_smoke_and_bench()
+{
+	PREFIX="$OUTDIR/install"
+	BINDIR="$PREFIX/usr/local/pgsql/bin"
+
+	log "installing stripped profile for smoke and benchmark sanity"
+	rm -rf "$PREFIX"
+	run_make -C "$TOP_BUILDDIR" json-event-stripped-install DESTDIR="$PREFIX"
+	TOP_INSTALL="$PREFIX" patch_darwin_libpq_install_names
+	patch_installed_bindir "$BINDIR"
+
+	log "running installed smoke test"
+	"$BINDIR/json_event_smoke" --bindir "$BINDIR" --rows "$ROWS"
+
+	log "running benchmark help sanity"
+	"$BINDIR/json_event_bench" --help >/dev/null
+}
+
+patch_installed_bindir()
+{
+	bindir=$1
+	[ "$(uname -s)" = "Darwin" ] || return 0
+	[ -d "$bindir" ] || return 0
+
+	for f in "$bindir"/*; do
+		if [ -f "$f" ] && otool -L "$f" 2>/dev/null | grep -q '/usr/local/pgsql/lib/libpq.5.dylib'; then
+			install_name_tool -change /usr/local/pgsql/lib/libpq.5.dylib @loader_path/../lib/libpq.5.dylib "$f" || true
+		fi
+	done
+}
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--top-builddir)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			TOP_BUILDDIR=$2
+			shift 2
+			;;
+		--output-dir)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			OUTDIR=$2
+			shift 2
+			;;
+		-j|--jobs)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			JOBS="-j$2"
+			shift 2
+			;;
+		--rows)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			ROWS=$2
+			shift 2
+			;;
+		--skip-package)
+			SKIP_PACKAGE="1"
+			shift
+			;;
+		--skip-regress)
+			SKIP_REGRESS="1"
+			shift
+			;;
+		--keep-artifacts)
+			KEEP_ARTIFACTS="1"
+			shift
+			;;
+		--verbose)
+			VERBOSE="1"
+			shift
+			;;
+		-h|--help)
+			usage
+			exit 0
+			;;
+		*)
+			die "unknown option: $1"
+			;;
+	esac
+done
+
+case "$ROWS" in
+	""|*[!0-9]*)
+		die "--rows must be a positive integer"
+		;;
+esac
+[ "$ROWS" -gt 0 ] || die "--rows must be a positive integer"
+
+[ -f "$TOP_BUILDDIR/GNUmakefile" ] || die "$TOP_BUILDDIR does not look like a configured PostgreSQL build tree"
+OUTDIR=$(mkdir -p "$OUTDIR" && CDPATH= cd -- "$OUTDIR" && pwd)
+CI_LOG="$OUTDIR/json_event_ci.BUILDLOG"
+rm -f "$CI_LOG"
+
+log "building stripped profile"
+run_make -C "$TOP_BUILDDIR" $JOBS json-event-stripped-world
+
+if [ "$SKIP_REGRESS" != "1" ]; then
+	run_regressions
+fi
+
+if [ "$SKIP_PACKAGE" != "1" ]; then
+	log "creating release package"
+	PACKAGE_ARGS="--skip-build --output-dir $OUTDIR --name postgres-json-event-ci"
+	if [ "$VERBOSE" = "1" ]; then
+		PACKAGE_ARGS="$PACKAGE_ARGS --verbose"
+	fi
+	# shellcheck disable=SC2086
+	"$TOP_BUILDDIR/contrib/json_event_stream/json_event_package" $PACKAGE_ARGS
+fi
+
+run_installed_smoke_and_bench
+
+if [ "$KEEP_ARTIFACTS" != "1" ]; then
+	rm -rf "$OUTDIR/install"
+fi
+
+log "json_event_ci passed"
+echo "buildlog=$CI_LOG"

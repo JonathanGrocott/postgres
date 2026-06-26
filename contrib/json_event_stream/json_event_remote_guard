@@ -1,0 +1,83 @@
+#!/bin/sh
+#
+# json_event_remote_guard - refuse publish actions while remotes target upstream.
+
+set -eu
+
+TOPDIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+REMOTE="origin"
+EXPECTED_PATTERN=""
+
+usage()
+{
+	cat <<'EOF'
+Usage: json_event_remote_guard [OPTIONS]
+
+Check that a writable git remote is not the upstream PostgreSQL repository.
+
+Options:
+      --topdir DIR             Repository root (default: script repo)
+      --remote NAME            Remote to inspect (default: origin)
+      --expect-substring TEXT  Require the push URL to contain TEXT
+  -h, --help                   Show this help
+
+This is a local guardrail for the JSON event clean fork. It does not modify git
+configuration.
+EOF
+}
+
+die()
+{
+	echo "json_event_remote_guard: $*" >&2
+	exit 1
+}
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--topdir)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			TOPDIR=$2
+			shift 2
+			;;
+		--remote)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			REMOTE=$2
+			shift 2
+			;;
+		--expect-substring)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			EXPECTED_PATTERN=$2
+			shift 2
+			;;
+		-h|--help)
+			usage
+			exit 0
+			;;
+		*)
+			die "unknown option: $1"
+			;;
+	esac
+done
+
+[ -d "$TOPDIR/.git" ] || die "$TOPDIR is not a git repository root"
+
+PUSH_URL=$(git -C "$TOPDIR" remote get-url --push "$REMOTE" 2>/dev/null || true)
+[ -n "$PUSH_URL" ] || die "remote '$REMOTE' has no push URL"
+
+case "$PUSH_URL" in
+	https://github.com/postgres/postgres.git|git@github.com:postgres/postgres.git|*github.com/postgres/postgres*)
+		die "remote '$REMOTE' push URL points at upstream PostgreSQL: $PUSH_URL"
+		;;
+esac
+
+if [ -n "$EXPECTED_PATTERN" ]; then
+	case "$PUSH_URL" in
+		*"$EXPECTED_PATTERN"*)
+			;;
+		*)
+			die "remote '$REMOTE' push URL does not contain expected text '$EXPECTED_PATTERN': $PUSH_URL"
+			;;
+	esac
+fi
+
+echo "ok remote=$REMOTE push_url=$PUSH_URL"
