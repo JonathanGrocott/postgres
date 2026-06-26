@@ -24,12 +24,12 @@ $(call recurse,world-bin,src config contrib,all)
 world-bin-contrib-recurse: world-bin-src-recurse
 
 .PHONY: json-event-stripped-world json-event-stripped-install
-json-event-stripped-world:
+json-event-stripped-world: submake-generated-headers
 	$(MAKE) -C src all
 	$(MAKE) -C config all
 	$(MAKE) -C contrib JSON_EVENT_STREAM_PROFILE=1 all
 
-json-event-stripped-install:
+json-event-stripped-install: submake-generated-headers
 	$(MAKE) -C src install
 	$(MAKE) -C config install
 	$(MAKE) -C contrib JSON_EVENT_STREAM_PROFILE=1 install
