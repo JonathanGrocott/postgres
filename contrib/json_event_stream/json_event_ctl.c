@@ -196,7 +196,7 @@ command_create_stream(PGconn *conn, int argc, char **argv, bool echo)
 	const char *params[5];
 	int			c;
 
-	optind = 1;
+	optind = 2;
 	while ((c = getopt_long(argc, argv, "", long_options, NULL)) != -1)
 	{
 		switch (c)
@@ -218,14 +218,14 @@ command_create_stream(PGconn *conn, int argc, char **argv, bool echo)
 		}
 	}
 
-	if (optind >= argc)
+	if (argc < 2)
 		pg_fatal("create-stream requires STREAM");
 
 	if (schema == NULL)
 	{
 		const char *params4[4];
 
-		params4[0] = argv[optind];
+		params4[0] = argv[1];
 		params4[1] = partition_interval;
 		params4[2] = retention;
 		params4[3] = payload_gin;
@@ -236,7 +236,7 @@ command_create_stream(PGconn *conn, int argc, char **argv, bool echo)
 	}
 
 	params[0] = schema;
-	params[1] = argv[optind];
+	params[1] = argv[1];
 	params[2] = partition_interval;
 	params[3] = retention;
 	params[4] = payload_gin;
@@ -262,7 +262,7 @@ command_create_mqtt_source(PGconn *conn, int argc, char **argv, bool echo)
 	const char *params[5];
 	int			c;
 
-	optind = 1;
+	optind = 2;
 	while ((c = getopt_long(argc, argv, "", long_options, NULL)) != -1)
 	{
 		if (c == 1)
@@ -277,10 +277,10 @@ command_create_mqtt_source(PGconn *conn, int argc, char **argv, bool echo)
 			pg_fatal("invalid create-mqtt-source option");
 	}
 
-	if (optind >= argc || broker == NULL || topic == NULL || stream == NULL)
+	if (argc < 2 || broker == NULL || topic == NULL || stream == NULL)
 		pg_fatal("create-mqtt-source requires NAME, --broker, --topic, and --stream");
 
-	params[0] = argv[optind];
+	params[0] = argv[1];
 	params[1] = broker;
 	params[2] = topic;
 	params[3] = stream;
@@ -305,7 +305,7 @@ command_create_http_source(PGconn *conn, int argc, char **argv, bool echo)
 	const char *params[4];
 	int			c;
 
-	optind = 1;
+	optind = 2;
 	while ((c = getopt_long(argc, argv, "", long_options, NULL)) != -1)
 	{
 		if (c == 1)
@@ -318,10 +318,10 @@ command_create_http_source(PGconn *conn, int argc, char **argv, bool echo)
 			pg_fatal("invalid create-http-source option");
 	}
 
-	if (optind >= argc || route == NULL || stream == NULL)
+	if (argc < 2 || route == NULL || stream == NULL)
 		pg_fatal("create-http-source requires NAME, --route, and --stream");
 
-	params[0] = argv[optind];
+	params[0] = argv[1];
 	params[1] = route;
 	params[2] = stream;
 	params[3] = enabled;
