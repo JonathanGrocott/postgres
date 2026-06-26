@@ -13,6 +13,8 @@ KEEP_ARTIFACTS="0"
 SKIP_PACKAGE="0"
 SKIP_REGRESS="0"
 VERBOSE="0"
+CI_LOG=""
+REGRESS_LOG=""
 
 usage()
 {
@@ -51,6 +53,24 @@ log()
 {
 	printf '%s\n' "==> $*"
 }
+
+on_error()
+{
+	rc=$?
+
+	if [ -n "$CI_LOG" ] && [ -f "$CI_LOG" ]; then
+		echo "==> tail of $CI_LOG" >&2
+		tail -120 "$CI_LOG" >&2 || true
+	fi
+	if [ -n "$REGRESS_LOG" ] && [ -f "$REGRESS_LOG" ]; then
+		echo "==> tail of $REGRESS_LOG" >&2
+		tail -120 "$REGRESS_LOG" >&2 || true
+	fi
+
+	exit "$rc"
+}
+
+trap on_error ERR
 
 run_make()
 {

@@ -38,11 +38,15 @@ jobs:
         run: contrib/json_event_stream/json_event_ci -j 2 --rows 100 --keep-artifacts
 
       - name: Upload package artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: postgres-json-event-ci
+          if-no-files-found: ignore
           path: |
             artifacts/json_event_ci/postgres-json-event-ci.tar.gz
             artifacts/json_event_ci/postgres-json-event-ci.MANIFEST
             artifacts/json_event_ci/postgres-json-event-ci.BUILDINFO
             artifacts/json_event_ci/postgres-json-event-ci.BUILDLOG
+            artifacts/json_event_ci/json_event_ci.BUILDLOG
+            artifacts/json_event_ci/json_event_stream_regress.log
