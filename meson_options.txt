@@ -52,6 +52,11 @@ option('PG_TEST_EXTRA', type: 'string', value: '',
 option('PG_GIT_REVISION', type: 'string', value: 'HEAD',
   description: 'git revision to be packaged by pgdist target')
 
+option('contrib_profile', type: 'combo',
+  choices: ['full', 'json_event_stream'],
+  value: 'full',
+  description: 'Contrib package profile to build')
+
 
 # Compilation options
 

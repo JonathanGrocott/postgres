@@ -1,0 +1,135 @@
+#!/bin/sh
+#
+# json_event_smoke - boot a temp cluster and verify JSON event operators.
+
+set -eu
+
+BINDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+TMPDIR_ROOT="${TMPDIR:-/tmp}"
+ROWS="100"
+PORT=$((54000 + ($$ % 10000)))
+KEEP="0"
+
+usage()
+{
+	cat <<'EOF'
+Usage: json_event_smoke [OPTIONS]
+
+Start a temporary PostgreSQL cluster and verify the installed JSON event profile.
+
+Options:
+      --bindir DIR   Directory containing initdb, pg_ctl, psql, json_event_ctl,
+                     and json_event_bench (default: script directory)
+      --tmpdir DIR   Temporary working directory parent
+      --rows N       Rows for json_event_bench (default: 100)
+      --port PORT    Port for the temporary server
+      --keep         Keep the temporary cluster after the run
+  -h, --help         Show this help
+EOF
+}
+
+die()
+{
+	echo "json_event_smoke: $*" >&2
+	exit 1
+}
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--bindir)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			BINDIR=$2
+			shift 2
+			;;
+		--tmpdir)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			TMPDIR_ROOT=$2
+			shift 2
+			;;
+		--rows)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			ROWS=$2
+			shift 2
+			;;
+		--port)
+			[ "$#" -ge 2 ] || die "$1 requires an argument"
+			PORT=$2
+			shift 2
+			;;
+		--keep)
+			KEEP="1"
+			shift
+			;;
+		-h|--help)
+			usage
+			exit 0
+			;;
+		*)
+			die "unknown option: $1"
+			;;
+	esac
+done
+
+case "$ROWS" in
+	""|*[!0-9]*)
+		die "--rows must be a positive integer"
+		;;
+esac
+[ "$ROWS" -gt 0 ] || die "--rows must be a positive integer"
+
+BINDIR=$(CDPATH= cd -- "$BINDIR" && pwd)
+for tool in initdb pg_ctl psql json_event_ctl json_event_bench; do
+	[ -x "$BINDIR/$tool" ] || die "required executable not found: $BINDIR/$tool"
+done
+
+WORKDIR=$(mktemp -d "$TMPDIR_ROOT/json_event_smoke.XXXXXX")
+DATADIR="$WORKDIR/data"
+SOCKETDIR="$WORKDIR/socket"
+LOGFILE="$WORKDIR/postgres.log"
+mkdir -p "$SOCKETDIR"
+
+cleanup()
+{
+	if [ -d "$DATADIR" ]; then
+		"$BINDIR/pg_ctl" -D "$DATADIR" stop -m fast >/dev/null 2>&1 || true
+	fi
+	if [ "$KEEP" != "1" ]; then
+		rm -rf "$WORKDIR"
+	else
+		echo "kept=$WORKDIR"
+	fi
+}
+trap cleanup EXIT INT TERM
+
+"$BINDIR/initdb" --auth trust --no-sync --no-instructions "$DATADIR" >/dev/null
+"$BINDIR/pg_ctl" -D "$DATADIR" -o "-p $PORT -k $SOCKETDIR" -l "$LOGFILE" start >/dev/null
+
+CONNINFO="host=$SOCKETDIR port=$PORT dbname=postgres"
+
+"$BINDIR/json_event_ctl" -d "$CONNINFO" init >/dev/null
+"$BINDIR/json_event_ctl" -d "$CONNINFO" create-stream smoke_events \
+	--partition-interval "1 day" \
+	--retention "7 days" \
+	--payload-gin >/dev/null
+"$BINDIR/json_event_ctl" -d "$CONNINFO" create-http-source smoke_http \
+	--route /streams/smoke_events/events \
+	--stream smoke_events >/dev/null
+PATH="$BINDIR:$PATH" PSQL="$BINDIR/psql" PGOPTIONS="${PGOPTIONS:-} -c client_min_messages=warning" \
+	"$BINDIR/json_event_bench" -d "$CONNINFO" --stream smoke_events --rows "$ROWS" --payload-gin --no-reset >/dev/null
+
+STREAMS=$("$BINDIR/psql" "$CONNINFO" -X -qAt -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM json_event_streams")
+SOURCES=$("$BINDIR/psql" "$CONNINFO" -X -qAt -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM json_event_sources WHERE source_name = 'smoke_http'")
+EVENTS=$("$BINDIR/psql" "$CONNINFO" -X -qAt -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM smoke_events")
+DEAD_LETTERS=$("$BINDIR/psql" "$CONNINFO" -X -qAt -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM json_event_dead_letters")
+
+[ "$STREAMS" -ge 1 ] || die "json_event_streams did not register the smoke stream"
+[ "$SOURCES" -eq 1 ] || die "smoke_http source was not registered"
+[ "$EVENTS" -ge "$ROWS" ] || die "smoke_events row count is lower than expected"
+[ "$DEAD_LETTERS" -eq 0 ] || die "smoke test generated dead letters"
+
+echo "streams=$STREAMS"
+echo "sources=$SOURCES"
+echo "events=$EVENTS"
+echo "dead_letters=$DEAD_LETTERS"
+
+echo "ok=json_event_smoke"

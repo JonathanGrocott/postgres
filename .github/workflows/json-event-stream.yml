@@ -1,0 +1,48 @@
+name: JSON Event Stream Local Fork CI
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/json-event-stream.yml'
+      - 'GNUmakefile.in'
+      - 'contrib/Makefile'
+      - 'contrib/meson.build'
+      - 'contrib/json_event_stream/**'
+      - 'meson_options.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  json-event-stream:
+    name: Stripped Profile Package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            bison \
+            flex \
+            libreadline-dev \
+            zlib1g-dev
+
+      - name: Configure
+        run: ./configure --without-readline
+
+      - name: Run JSON event CI gate
+        run: contrib/json_event_stream/json_event_ci -j 2 --rows 100 --keep-artifacts
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-json-event-ci
+          path: |
+            artifacts/json_event_ci/postgres-json-event-ci.tar.gz
+            artifacts/json_event_ci/postgres-json-event-ci.MANIFEST
+            artifacts/json_event_ci/postgres-json-event-ci.BUILDINFO
+            artifacts/json_event_ci/postgres-json-event-ci.BUILDLOG

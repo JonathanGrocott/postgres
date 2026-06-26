@@ -1,0 +1,168 @@
+CREATE EXTENSION json_event_stream;
+CREATE TABLE collision(id int);
+SELECT json_event_stream_create('collision');
+ERROR:  relation public.collision already exists and is not a json event stream
+CONTEXT:  PL/pgSQL function json_event_stream_create(name,name,interval,interval,boolean) line 55 at RAISE
+SELECT json_event_stream_create('events', '1 day', '7 days', true);
+ json_event_stream_create 
+--------------------------
+ events
+(1 row)
+
+CREATE SCHEMA ingest;
+SELECT json_event_stream_create('ingest', 'web_events', '1 hour', '1 day', false);
+ json_event_stream_create 
+--------------------------
+ ingest.web_events
+(1 row)
+
+SELECT json_event_mqtt_source_create(
+	'line1',
+	'mqtts://broker.example.com',
+	'factory/line1/#',
+	'events'::regclass);
+ json_event_mqtt_source_create 
+-------------------------------
+ line1
+(1 row)
+
+SELECT json_event_http_source_create(
+	'webhook',
+	'/events',
+	'events'::regclass);
+ json_event_http_source_create 
+-------------------------------
+ webhook
+(1 row)
+
+SELECT json_event_stream_ingest(
+	'events'::regclass,
+	'line1',
+	'factory/line1/temperature',
+	'{"temperature": 82, "unit": "F"}'::jsonb,
+	'{"qos": 1}'::jsonb,
+	'2026-06-24 12:00:00+00'::timestamptz,
+	'2026-06-24 12:00:01+00'::timestamptz);
+ json_event_stream_ingest 
+--------------------------
+                        1
+(1 row)
+
+SELECT json_event_stream_ingest(
+	'ingest.web_events'::regclass,
+	'webhook',
+	'/events',
+	'{"ok": true}'::jsonb,
+	'{}'::jsonb,
+	NULL,
+	'2026-06-24 12:30:00+00'::timestamptz);
+ json_event_stream_ingest 
+--------------------------
+                        1
+(1 row)
+
+SELECT json_event_stream_ingest(
+	'events'::regclass,
+	'',
+	'factory/line1/temperature',
+	'{"temperature": 82}'::jsonb);
+ERROR:  source must not be empty
+CONTEXT:  PL/pgSQL function json_event_stream_ingest(regclass,text,text,jsonb,jsonb,timestamp with time zone,timestamp with time zone) line 12 at RAISE
+SELECT topic, payload @? '$.temperature ? (@ > 80)' AS hot
+FROM events
+WHERE received_at >= '2026-06-24 00:00:00+00'::timestamptz;
+           topic           | hot 
+---------------------------+-----
+ factory/line1/temperature | t
+(1 row)
+
+SELECT source, topic, payload
+FROM ingest.web_events;
+ source  |  topic  |   payload    
+---------+---------+--------------
+ webhook | /events | {"ok": true}
+(1 row)
+
+SELECT json_event_stream_reject(
+	'events'::regclass,
+	'line1',
+	'factory/line1/bad',
+	'{bad json',
+	'invalid_json',
+	'payload could not be parsed');
+ json_event_stream_reject 
+--------------------------
+                        1
+(1 row)
+
+SELECT source_name, source_type, enabled
+FROM json_event_ingestion_status
+ORDER BY source_name;
+ source_name | source_type | enabled 
+-------------+-------------+---------
+ line1       | mqtt        | t
+ webhook     | http        | t
+(2 rows)
+
+SELECT source, topic, error_code
+FROM json_event_rejected_messages;
+ source |       topic       |  error_code  
+--------+-------------------+--------------
+ line1  | factory/line1/bad | invalid_json
+(1 row)
+
+SELECT stream_table, partition_table IS NOT NULL AS has_partition
+FROM json_event_partition_status
+ORDER BY partition_table::text;
+   stream_table    | has_partition 
+-------------------+---------------
+ events            | t
+ events            | t
+ ingest.web_events | t
+ ingest.web_events | t
+(4 rows)
+
+SELECT json_event_stream_set_retention('events'::regclass, '100 years');
+ json_event_stream_set_retention 
+---------------------------------
+ 
+(1 row)
+
+SELECT bool_or(would_drop) AS would_drop_any
+FROM json_event_stream_apply_retention('events'::regclass, true);
+ would_drop_any 
+----------------
+ f
+(1 row)
+
+SELECT stream_table, recommendation
+FROM json_event_index_recommendations;
+   stream_table    |                    recommendation                     
+-------------------+-------------------------------------------------------
+ ingest.web_events | Consider a payload GIN index for jsonpath predicates.
+ events            | Payload GIN index requested for this stream.
+(2 rows)
+
+SELECT json_event_stream_add_payload_path_index(
+	'events'::regclass,
+	'events_temperature_idx',
+	'temperature');
+ json_event_stream_add_payload_path_index 
+------------------------------------------
+ 
+(1 row)
+
+SELECT indexname
+FROM pg_indexes
+WHERE tablename = 'events'
+ORDER BY indexname;
+          indexname          
+-----------------------------
+ events_payload_gin_idx
+ events_received_at_brin_idx
+ events_temperature_idx
+ events_topic_idx
+(4 rows)
+
+\echo json_event_stream_done
+json_event_stream_done

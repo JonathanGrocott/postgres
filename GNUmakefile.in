@@ -23,6 +23,17 @@ $(call recurse,world-bin,src config contrib,all)
 # build src/ before contrib/
 world-bin-contrib-recurse: world-bin-src-recurse
 
+.PHONY: json-event-stripped-world json-event-stripped-install
+json-event-stripped-world:
+	$(MAKE) -C src all
+	$(MAKE) -C config all
+	$(MAKE) -C contrib JSON_EVENT_STREAM_PROFILE=1 all
+
+json-event-stripped-install:
+	$(MAKE) -C src install
+	$(MAKE) -C config install
+	$(MAKE) -C contrib JSON_EVENT_STREAM_PROFILE=1 install
+
 html man:
 	$(MAKE) -C doc $@
 

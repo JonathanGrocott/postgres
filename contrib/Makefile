@@ -4,7 +4,10 @@ subdir = contrib
 top_builddir = ..
 include $(top_builddir)/src/Makefile.global
 
-SUBDIRS = \
+JSON_EVENT_STREAM_SUBDIRS = \
+		json_event_stream
+
+FULL_SUBDIRS = \
 		amcheck		\
 		auth_delay	\
 		auto_explain	\
@@ -25,6 +28,7 @@ SUBDIRS = \
 		intagg		\
 		intarray	\
 		isn		\
+		json_event_stream \
 		lo		\
 		ltree		\
 		oid2name	\
@@ -54,6 +58,11 @@ SUBDIRS = \
 		tsm_system_time \
 		unaccent	\
 		vacuumlo
+
+ifeq ($(JSON_EVENT_STREAM_PROFILE),1)
+SUBDIRS = $(JSON_EVENT_STREAM_SUBDIRS)
+else
+SUBDIRS = $(FULL_SUBDIRS)
 
 ifeq ($(with_ssl),openssl)
 SUBDIRS += pgcrypto sslinfo
@@ -89,6 +98,7 @@ ifeq ($(with_python),yes)
 SUBDIRS += hstore_plpython jsonb_plpython ltree_plpython
 else
 ALWAYS_SUBDIRS += hstore_plpython jsonb_plpython ltree_plpython
+endif
 endif
 
 # Missing:
